@@ -21,6 +21,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_archive/flutter_archive.dart';
 import 'package:path/path.dart';
@@ -106,7 +107,7 @@ class YoutubeDL {
         destinationDir: destinationDir,
         onExtracting: (zipEntry, progress) {
           prog(zipEntry.name, progress);
-          return ExtractOperation.extract;
+          return ZipFileOperation.includeItem;
         },
       );
     } catch (e) {
@@ -169,6 +170,52 @@ class YoutubeDL {
     return result;
   }
 
+  static Future<void> runCommand(YoutubeDLCallback callback, List<String> options) async {
+    var dir = await getApplicationSupportDirectory();
+    var shell = await _createShell();
+
+    var pparam = List<String>.from(options);
+
+    pparam.insert(
+        0, join(dir.path, 'python', 'usr', 'youtube_dl', '__main__.py'));
+    pparam.add('--cache-dir');
+    pparam.add(join(dir.path, 'python', 'usr', 'bin', '.cache'));
+    var echo = await shell.start('./libpython3.so', pparam);
+
+    if(!pparam.contains("--skip-download") && callback != null) {
+      var progressExp = RegExp(r'\[download\]\s+(\d+(\.\d)?)%.*?');
+      var isDownloaded = false;
+      await echo.stdout.listen((event) {
+        if (isDownloaded) return;
+        for (var eventString in utf8.decode(event).trim().split('\r')) {
+          if(kDebugMode) print(eventString);
+          if (eventString.startsWith('[download]')) {
+            if (eventString.contains('has already been downloaded')) {
+              // just keep going
+              isDownloaded = true;
+              return;
+            }
+
+            if (eventString.contains('Destination')) {
+              callback.pathCallback(eventString.split('Destination:').last.trim());
+              continue;
+            }
+
+            var progressMatches = progressExp.allMatches(eventString);
+            if(progressMatches.isNotEmpty) {
+              callback.progressCallback(double.parse(progressMatches.first[1]));
+            }
+          }
+        }
+      }).asFuture();
+    } else {
+      await echo.stdout.readAsString();
+    }
+
+    var err = (await echo.stderr.readAsString()).trim();
+    if (err.length != 0) throw Exception(err);
+  }
+
   static Future<String> requestThumbnail(String url,
       [List<String> options]) async {
     options ??= List<String>();
@@ -192,6 +239,36 @@ class YoutubeDL {
     if (err.length != 0) throw Exception(err);
 
     return thumbnail.trim();
+  }
+
+  static Future<void> requestAutogenSubtitles(
+      String url, String path, String lang,
+      [List<String> options]) async {
+    var dir = await getApplicationSupportDirectory();
+    var shell = await _createShell();
+
+    var pparam = List<String>.from(options);
+
+    pparam.insert(0, path);
+    pparam.insert(0, '-o');
+
+    if (lang != null) {
+      pparam.insert(0, lang);
+      pparam.insert(0, '--sub-lang');
+    }
+
+    pparam.insert(0, url);
+    pparam.insert(0, '--skip-download');
+    pparam.insert(0, '--write-auto-sub');
+
+    pparam.insert(
+        0, join(dir.path, 'python', 'usr', 'youtube_dl', '__main__.py'));
+    pparam.add('--cache-dir');
+    pparam.add(join(dir.path, 'python', 'usr', 'bin', '.cache'));
+    var echo = await shell.start('./libpython3.so', pparam);
+    await echo.stdout.readAsString();
+    var err = (await echo.stderr.readAsString()).trim();
+    if (err.length != 0) throw Exception(err);
   }
 
   static Future<void> requestDownload(
